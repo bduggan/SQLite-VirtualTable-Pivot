@@ -1,0 +1,35 @@
+Rows       : 5000
+Columns    : 50
+Sparseness : 25
+making views and virtual tables
+query :  select_num
+ aggregate :0.508032
+    joined :35.810238
+   virtual :2.768173
+rows : 494
+query :  select_restrictive2
+ aggregate :3.316207
+    joined :8.104507
+   virtual :0.608038
+rows : 12
+query :  select_restrictive
+ aggregate :3.352210
+    joined :6.564411
+   virtual :0.460029
+rows : 2
+query :  select
+ aggregate :0.488030
+    joined :6.664417
+   virtual :0.544034
+rows : 0
+query :  select_string
+ aggregate :0.416026
+    joined :18.821176
+   virtual :0.428027
+rows : 5
+query :  select_with_or
+ aggregate :0.560035
+    joined :9.064566
+   virtual :5.988374
+rows : 21
+
