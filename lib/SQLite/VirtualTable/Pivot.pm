@@ -97,6 +97,7 @@ in the pivot table.
     - re-use the existing database handle (requires changes
       to SQLite::VirtualTable)
     - allow modification of the data in the virtual table
+    - value column must have integer affinity (remove this restriction)
     - more optimization
 
 =head1 SEE ALSO
@@ -121,7 +122,9 @@ our $VERSION = 0.01;
 __PACKAGE__->mk_accessors(qw| indexes counts                     |);
 __PACKAGE__->mk_accessors(qw| table columns vcolumns             |);
 __PACKAGE__->mk_accessors(qw| pivot_row pivot_column pivot_value |);
-__PACKAGE__->mk_accessors(qw| pivot_row_type |);
+__PACKAGE__->mk_accessors(qw| pivot_row_ref pivot_column_ref     |);
+__PACKAGE__->mk_accessors(qw| pivot_value_ref                    |);
+__PACKAGE__->mk_accessors(qw| pivot_row_type                     |);
 
 our $dbfile = $ENV{SQLITE_CURRENT_DB} or die "please set SQLITE_CURRENT_DB";
 our $db;
@@ -138,9 +141,19 @@ sub _init_db {
     my %args = @_;
     our $db;
     return if defined($db) && !$args{force};
+    debug "connect to $dbfile";
     $db = DBIx::Simple->connect( "dbi:SQLite:dbname=$dbfile", "", "" )
       or die DBIx::Simple->error;
     $db->dbh->do("PRAGMA temp_store = 2"); # use in-memory temp tables
+}
+
+sub _parse_refspec {
+    # turn "entity->entity(id).value",
+    # into ("entity" , { table=>"entity", child_key => "id", child_label => "value"} )
+    my $str = shift;
+    $str =~ /^(.*)->(.*)\((.*)\)\.(.*)$/ and return
+        ($1, { table => $2, child_key => $3, child_label => $4 });
+    return $str;
 }
 
 sub CREATE {
@@ -149,11 +162,16 @@ sub CREATE {
     $other_table = unescape($other_table);
     _init_db();
     my ($pivot_row, $pivot_row_type, $pivot_column, $pivot_value );
+
+    my ($pivot_row_ref, $pivot_column_ref, $pivot_value_ref);
     if (@pivot_columns == 3) {
         ($pivot_row, $pivot_column, $pivot_value ) = map unescape($_), @pivot_columns;
         if ($pivot_row =~ / /) {
             ($pivot_row,$pivot_row_type) = split / /, $pivot_row;
         }
+        ($pivot_row   ,$pivot_row_ref)    = _parse_refspec($pivot_row);
+        ($pivot_column,$pivot_column_ref) = _parse_refspec($pivot_column);
+        ($pivot_value ,$pivot_value_ref)  = _parse_refspec($pivot_value);
     } else {
         my ($sql) = $db->select('sqlite_master', [ 'sql' ] ,{ name => $other_table })->list 
             or die "Could not find table '$other_table' ".$db->error;
@@ -161,10 +179,10 @@ sub CREATE {
         $sql =~ s/\)[^\)]*$//; # and trailing "CREATE" declaration, to get columns
         ($pivot_row, $pivot_column, $pivot_value ) = split ',', $sql;
         ($pivot_row_type) = $pivot_row =~ /^\s*\S* (.*)$/;
-        for ($pivot_row, $pivot_column, $pivot_value ) {
-            s/^\s*//;
-            s/ .*$//;
-        }
+    }
+    for ($pivot_row, $pivot_column, $pivot_value ) {
+        s/^\s*//;
+        s/ .*$//;
     }
     debug "pivot col is $pivot_column";
     my @columns = (
@@ -174,11 +192,29 @@ sub CREATE {
                 $pivot_column, $other_table))->flat
     );
     debug "distinct values for $pivot_column in $other_table are @columns";
+
     my @vcolumns = @columns;  # virtual table column names
+    if ($pivot_column_ref) {
+        @vcolumns = ($vcolumns[0]);
+        for my $c (@columns) {
+            die unless $pivot_column_ref->{table} eq 'attributes';
+            die unless $pivot_column_ref->{child_key} eq 'id';
+            die unless $pivot_column_ref->{child_label} eq 'attribute';
+
+            my ($next) = $db->select(
+                $pivot_column_ref->{table},
+                $pivot_column_ref->{child_label},
+                { $pivot_column_ref->{child_key} => $c }
+              )->flat or next;
+            push @vcolumns, $next;
+        }
+    }
     for (@vcolumns) { # make column names legal
         tr/a-zA-Z0-9_//dc;
         $_ = "$pivot_column\_$_" unless $_=~/^[a-zA-Z]/;
     }
+
+    debug "pivotrowtype is '$pivot_row_type'";
 
     $pivot_row_type ||= "varchar";
     bless {
@@ -188,8 +224,11 @@ sub CREATE {
         vcolumns       => \@vcolumns,      # the names of the virtual pivot table columns
         pivot_row      => $pivot_row,      # the name of the "pivot row" column in the base table
         pivot_row_type => $pivot_row_type, # the column affinity for the pivot row
+        pivot_row_ref  => $pivot_row_ref,  # hash (see _parse_refspec)
         pivot_column   => $pivot_column,   # the name of the "pivot column" column in the base table
-        pivot_value    => $pivot_value     # the name of the "pivot value" column in the base table
+        pivot_column_ref => $pivot_column_ref,  # hash (see _parse_refspec)
+        pivot_value      => $pivot_value,     # the name of the "pivot value" column in the base table
+        pivot_value_ref  => $pivot_value_ref, # hash (see _parse_refspec)
     }, $class;
 }
 *CONNECT = \&CREATE;
@@ -215,7 +254,7 @@ sub _do_query {
         my $temp_table = _new_temp_table();
         push @{ $cursor->temp_tables }, $temp_table;
         debug "creating temporary table $temp_table ";
-        my $key = $self->pivot_row_type =~ /integer/i ? " INTEGER PRIMARY KEY" : "";
+        my $key = $self->pivot_row_type =~ /int/i ? " INTEGER PRIMARY KEY" : "";
         $db->query( sprintf("CREATE TEMPORARY TABLE %s (%s $key)",
                              $temp_table, $self->pivot_row)
                   ) or die $db->error;
@@ -226,32 +265,47 @@ sub _do_query {
                 $temp_table, $self->pivot_row, $self->table, $self->pivot_row, $OpMap{$constraint->{operator}} );
             @bind = ($value);
         } else {
-            # TODO distinct?
-            $query = sprintf( "INSERT INTO %s SELECT %s FROM %s WHERE %s = ? AND %s %s ?",
-                             $temp_table, $self->pivot_row, $self->table,
-                             $self->pivot_column, $self->pivot_value,
-                             $OpMap{$constraint->{operator}});
+            my $ref = $self->pivot_value_ref;
+            my $join_clause = sprintf(
+                " INNER JOIN %s ON %s.%s=%s.%s ",
+                #e.g. " INNER JOIN value_s ON value_s.id=eav.value ";
+                $ref->{table}, $ref->{table}, $ref->{child_key},
+                $self->table,  $ref->{child_label}
+            ) if $self->pivot_row_ref;
+            my $value_table = $ref->{table} || $self->table;
+            my $value_column = $ref->{child_label} || $self->pivot_column;
+            $query = sprintf( "INSERT INTO %s SELECT %s FROM %s %s WHERE %s = ? AND %s.%s %s ?",
+                             $temp_table,
+                             $self->pivot_row,
+                             $self->table, $join_clause,
+                             $self->pivot_column, 
+                             $value_table, $self->pivot_value, $OpMap{$constraint->{operator}});
             @bind = ( $constraint->{column_name}, $value);
         }
-        info "ready to run $query";
+        info "ready to run $query with @bind";
         $db->query($query, @bind ) or die $db->error;
 
         info ("temp table $temp_table is for $constraint->{column_name} $constraint->{operator} $value");
-        info ("temp table $temp_table has : ".join ",", $db->select($temp_table,"*")->list);
+        #info ("temp table $temp_table has : ".join ",", $db->select($temp_table,"*")->list);
     }
     debug "created ".scalar @{ $cursor->temp_tables }." temp table(s)";
 
-    my $sql = sprintf( "SELECT a.%s, %s, %s FROM %s a",
+    my $value_table = $self->pivot_value_ref ? $self->pivot_value_ref->{table} : 'a';
+    my $sql = sprintf( "SELECT a.%s, %s, %s.%s FROM %s a",
                         $self->pivot_row,   $self->pivot_column,
-                        $self->pivot_value, $self->table); 
+                        $value_table,       $self->pivot_value,
+                        $self->table); 
+
+    $sql .= sprintf(" INNER JOIN %s ON a.%s = %s.id ",
+        $value_table, $self->pivot_value, $value_table ) if $self->pivot_value_ref;
+
     for my $temp_table ($cursor->temp_tables) {
-        $sql .= sprintf( " INNER JOIN %s on %s.%s=a.%s ",
+        $sql .= sprintf( " INNER JOIN %s ON %s.%s=a.%s ",
             $temp_table,      $temp_table,
             $self->pivot_row, $self->pivot_row
         );
     }
     $sql .= sprintf(" ORDER BY a.%s", $self->pivot_row);
-    trace $sql;
 
     # TODO move into cursor.pm
     my (@current_row);
