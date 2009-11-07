@@ -41,12 +41,6 @@ Pivoting using the columns "Student" and "Subject" and the value "Grade" would y
  Joe     C          A       B
  Mary    C+         B-      A+
 
-SQLite::VirtualTable::Pivot allows one to manipulate tables
-of the first type (Entity-Attribute-Value tables) as though
-they were of the second type.
-
-=head1 METHODS
-
 To create a table, use the following syntax :
 
     create virtual table object_pivot using perl
@@ -63,12 +57,71 @@ in the base_table.  The distinct values of pivot_column will be
 the names of the new columns in the pivot table.  (The values may
 be sanitized to create valid column names.)
 
-After creating the table, it may be used like any other database
-table.
+After creating the table, it can be queried like a view.
 
 Note that if new values are added to the base table, it must be
 dropped and re-created, in order for the new columns to appear
 in the pivot table.
+
+=head1 Entity-Atribute-Value models
+
+The Entity-Attribute-Value model is a representation of data in
+a table containing three columns representing an entity, an attribute,
+and a value.  For instance :
+
+ Entity Attribute Value
+ ------ --------- -----
+ 1       color    red
+ 1       length   20
+ 2       color    blue
+
+It may be desirable to use foreign keys for some or all of the columns
+in such a table, and then to maintain separate tables for a list of
+all possible attributes, and all possible values.
+
+SQLite::VirtualTable::Pivot allows such setups to be handled transparently
+by specifying the relationships when creating the pivot table.  So, if
+we had the following EAV table :
+
+    create table entities (
+         id integer primary key,
+         entity varchar, 
+         unique (entity) );
+
+    create table attributes (
+        id integer primary key,
+        attribute varchar,
+        unique (attribute) );
+
+    create table value_s (
+        id integer primary key,
+        value integer, -- nb: "integer" is only the column affinity
+        unique (value) );
+
+    create table eav (
+        entity    integer references entities(id),
+        attribute integer references attributes(id),
+        value     integer references value_s(id),
+        primary key (entity,attribute)
+    );
+
+Then the pivot table created by this statement :
+
+ create virtual table
+     eav_pivot using perl ("SQLite::VirtualTable::Pivot",
+        "eav",
+        "entity->entity(id).entity",
+        "attribute->attributes(id).attribute",
+        "value->value_s(id).value"
+        );
+
+would automagically do the necessary joins, so that the
+columns were not the distinct values in eav.attribute,
+but rather the corresponding entries in attributes.attribute.
+
+Moreover, queries against the pivot table will do the right
+thing, the sense that restrictions will use the values in the
+value_s table, not in the eav table.
 
 =head1 EXAMPLE 
 
@@ -162,6 +215,12 @@ sub CREATE {
     $other_table = unescape($other_table);
     _init_db();
     my ($pivot_row, $pivot_row_type, $pivot_column, $pivot_value );
+    my ($createsql) =
+      $db->select( 'sqlite_master', ['sql'], { name => $other_table } )->list
+      or die "Could not find table '$other_table' " . $db->error;
+    $createsql =~ s/^[^\(]*\(//; # remove leading
+    $createsql =~ s/\)[^\)]*$//; # and trailing "CREATE" declaration, to get columns
+    my @columns_and_contraints = split /,/, $createsql;
 
     my ($pivot_row_ref, $pivot_column_ref, $pivot_value_ref);
     if (@pivot_columns == 3) {
@@ -173,16 +232,14 @@ sub CREATE {
         ($pivot_column,$pivot_column_ref) = _parse_refspec($pivot_column);
         ($pivot_value ,$pivot_value_ref)  = _parse_refspec($pivot_value);
     } else {
-        my ($sql) = $db->select('sqlite_master', [ 'sql' ] ,{ name => $other_table })->list 
-            or die "Could not find table '$other_table' ".$db->error;
-        $sql =~ s/^[^\(]*\(//; # remove leading
-        $sql =~ s/\)[^\)]*$//; # and trailing "CREATE" declaration, to get columns
-        ($pivot_row, $pivot_column, $pivot_value ) = split ',', $sql;
+        ($pivot_row, $pivot_column, $pivot_value ) = @columns_and_contraints;
         ($pivot_row_type) = $pivot_row =~ /^\s*\S* (.*)$/;
     }
-    for ($pivot_row, $pivot_column, $pivot_value ) {
-        s/^\s*//;
-        s/ .*$//;
+    for my $col ($pivot_row, $pivot_column, $pivot_value ) {
+        $col =~ s/^\s*//;
+        $col =~ s/ .*$//;
+        next if grep /$col/i, @columns_and_contraints;
+        warn "could not find $col in columns for $other_table\n";
     }
     debug "pivot col is $pivot_column";
     my @columns = (
@@ -197,10 +254,6 @@ sub CREATE {
     if ($pivot_column_ref) {
         @vcolumns = ($vcolumns[0]);
         for my $c (@columns) {
-            die unless $pivot_column_ref->{table} eq 'attributes';
-            die unless $pivot_column_ref->{child_key} eq 'id';
-            die unless $pivot_column_ref->{child_label} eq 'attribute';
-
             my ($next) = $db->select(
                 $pivot_column_ref->{table},
                 $pivot_column_ref->{child_label},
@@ -291,9 +344,14 @@ sub _do_query {
     debug "created ".scalar @{ $cursor->temp_tables }." temp table(s)";
 
     my $value_table = $self->pivot_value_ref ? $self->pivot_value_ref->{table} : 'a';
-    my $sql = sprintf( "SELECT a.%s, %s, %s.%s FROM %s a",
-                        $self->pivot_row,   $self->pivot_column,
-                        $value_table,       $self->pivot_value,
+    my $sql = sprintf( "SELECT a.%s, %s, %s.%s AS %s FROM %s a",
+                        $self->pivot_row,    # == entity
+                        $self->pivot_column, # == attribute
+                        $value_table,
+                        (     $self->pivot_value_ref
+                            ? $self->pivot_value_ref->{child_label}
+                            : $self->pivot_value ),
+                        $self->pivot_value,
                         $self->table); 
 
     $sql .= sprintf(" INNER JOIN %s ON a.%s = %s.id ",
