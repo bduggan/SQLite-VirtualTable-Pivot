@@ -34,7 +34,8 @@ Given this table :
  Mary    Writing    A+
  Mary    Arithmetic C+
 
-Pivoting using the columns "Student" and "Subject" and the value "Grade" would yield :
+A pivot table created using the columns "Student" and "Subject"
+and the value "Grade" would yield :
 
  Student Arithmetic Reading Writing
  ------- ---------- ------- ----------
@@ -46,7 +47,7 @@ To create a table, use the following syntax :
     create virtual table object_pivot using perl
                ("SQLite::VirtualTable::Pivot", "base_table" );
 
-Or, alternatively
+To specify the three columns, use :
 
     create virtual table object_pivot using perl
                ("SQLite::VirtualTable::Pivot", "base_table",
@@ -57,11 +58,12 @@ in the base_table.  The distinct values of pivot_column will be
 the names of the new columns in the pivot table.  (The values may
 be sanitized to create valid column names.)
 
-After creating the table, it can be queried like a view.
+If any of the three columns are foreign keys, these may be
+collapsed in the pivot table, as described below.
 
-Note that if new values are added to the base table, it must be
-dropped and re-created, in order for the new columns to appear
-in the pivot table.
+The list of distinct columns is calculated the first
+time a pivot table is used (or created) in a database session.
+So, if the list changes, you may need to re-connect.
 
 =head1 Entity-Atribute-Value models
 
@@ -75,13 +77,9 @@ and a value.  For instance :
  1       length   20
  2       color    blue
 
-It may be desirable to use foreign keys for some or all of the columns
-in such a table, and then to maintain separate tables for a list of
-all possible attributes, and all possible values.
-
-SQLite::VirtualTable::Pivot allows such setups to be handled transparently
-by specifying the relationships when creating the pivot table.  So, if
-we had the following EAV table :
+To reduce redundancy or to constrain the possible attributes/values,
+some or all of the three columns may be foreign keys.  Consider for
+instance, the following :
 
     create table entities (
          id integer primary key,
@@ -105,7 +103,8 @@ we had the following EAV table :
         primary key (entity,attribute)
     );
 
-Then the pivot table created by this statement :
+Then the foreign keys may be "flattened" into the pivot table
+by using this SQL :
 
  create virtual table
      eav_pivot using perl ("SQLite::VirtualTable::Pivot",
@@ -115,12 +114,12 @@ Then the pivot table created by this statement :
         "value->value_s(id).value"
         );
 
-would automagically do the necessary joins, so that the
-columns were not the distinct values in eav.attribute,
-but rather the corresponding entries in attributes.attribute.
+Then the columns in eav_pivot would be the entries in
+attributes.attribute corresponding to the distinct
+values in eav.attribute.
 
 Moreover, queries against the pivot table will do the right
-thing, the sense that restrictions will use the values in the
+thing, in the sense that restrictions will use the values in the
 value_s table, not in the eav table.
 
 =head1 EXAMPLE 
@@ -145,51 +144,53 @@ value_s table, not in the eav table.
  select student from roster where writing = "A+";
  Mary
 
-=head1 TODO
-
-    - re-use the existing database handle (requires changes
-      to SQLite::VirtualTable)
-    - allow modification of the data in the virtual table
-    - value column must have integer affinity (remove this restriction)
-    - more optimization
-
-=head1 SEE ALSO
-
-L<SQLite::VirtualTable>
+=head1 FUNCTIONS (called by sqlite, see SQLite::VirtualTable)
 
 =cut
 
 package SQLite::VirtualTable::Pivot;
+
+# from CPAN
 use DBI;
 use DBIx::Simple;
 use Data::Dumper;
+use Scalar::Util qw/looks_like_number/;
 use SQLite::VirtualTable::Util qw/unescape/;
+
+# base modules
 use base 'SQLite::VirtualTable';
 use base 'Class::Accessor::Contextual';
+
+# local module
 use SQLite::VirtualTable::Pivot::Cursor;
-use Scalar::Util qw/looks_like_number/;
 use strict;
 
 our $VERSION = 0.01;
 
-__PACKAGE__->mk_accessors(qw| indexes counts                     |);
-__PACKAGE__->mk_accessors(qw| table columns vcolumns             |);
-__PACKAGE__->mk_accessors(qw| pivot_row pivot_column pivot_value |);
-__PACKAGE__->mk_accessors(qw| pivot_row_ref pivot_column_ref     |);
-__PACKAGE__->mk_accessors(qw| pivot_value_ref                    |);
-__PACKAGE__->mk_accessors(qw| pivot_row_type                     |);
+# Create r/w accessors for everything that we store in the class hash
+__PACKAGE__->mk_accessors(qw| table     |); # base_table name and distinct values
+__PACKAGE__->mk_accessors(qw| columns   |); # distinct values in base_table.$pivot_row
+__PACKAGE__->mk_accessors(qw| vcolumns  |); # valid column names based on the above
+__PACKAGE__->mk_accessors(qw| indexes counts |);  # populated by BEST_INDEX, used by FILTER
+__PACKAGE__->mk_accessors(qw| pivot_row    pivot_row_ref    |); # entity (in EAV) + fk info
+__PACKAGE__->mk_accessors(qw| pivot_column pivot_column_ref |); # attribute + fk info
+__PACKAGE__->mk_accessors(qw| pivot_value  pivot_value_ref  |); # value + fk info
+__PACKAGE__->mk_accessors(qw| pivot_row_type                |); # column affinity for entity
 
+# We need to use an env variable until DBD::SQLite + SQLite::VirtualTable
+# work together to pass one to CREATE()
 our $dbfile = $ENV{SQLITE_CURRENT_DB} or die "please set SQLITE_CURRENT_DB";
-our $db;
+our $db;  # handle: DBIx::Simple object
 
+# debug setup
 #$ENV{TRACE} = 1;
 #$ENV{DEBUG} = 1;
 $ENV{NO_INFO} = 1;
-
 sub info($)   { return if   $ENV{NO_INFO}; print STDERR "# $_[0]\n"; }
 sub debug($)  { return unless $ENV{DEBUG}; print STDERR "# $_[0]\n"; }
 sub trace($)  { return unless $ENV{TRACE}; print STDERR "# $_[0]\n"; }
 
+# Initialize the database handle.  Send force => 1 to force a reconnect
 sub _init_db {
     my %args = @_;
     our $db;
@@ -200,28 +201,83 @@ sub _init_db {
     $db->dbh->do("PRAGMA temp_store = 2"); # use in-memory temp tables
 }
 
+# Parse the string indicating a foreign key relationship in the base_table.
+# Given  "entity->entity_ref(id).value",
+# return ("entity" , { table=>"entity_ref", child_key => "id", child_label => "value"} ).
 sub _parse_refspec {
-    # turn "entity->entity(id).value",
-    # into ("entity" , { table=>"entity", child_key => "id", child_label => "value"} )
     my $str = shift;
-    $str =~ /^(.*)->(.*)\((.*)\)\.(.*)$/ and return
-        ($1, { table => $2, child_key => $3, child_label => $4 });
+    $str =~ /^(.*)->(.*)\((.*)\)\.(.*)$/
+      and return ( $1, { table => $2, child_key => $3, child_label => $4 } );
     return $str;
 }
 
+=head1 CREATE (constructor)
+
+Arguments :
+    module : "perl",
+    caller : "main"
+    virtual_table : the name of the table being created
+    base_table    : the table being pivoted
+    @pivot_columns (optional) : entity, attribute, value
+
+Returns :
+    A new SQLite::VirtualTable::Pivot object.
+
+Description :
+ Create a new SQLite::VirtualTable::Pivot object.  The base_table
+ is the table to be pivoted.  If this table contains only three
+ columns, then they will be used in order as the pivot_row,
+ pivot_column, and pivot_value columns (aka entity, attribute, value).
+ Alternatively, these columns may be specified in the create
+ statement by passing them as parameters.  If one of the values
+ is a foreign key and the pivot table should instead use a column
+ in the child table, that may be specified using the following
+ notation :
+
+    base_table_column->child_table(child_key).child_column_to_use
+
+ If a column name contains a space, then the portion after the
+ space should be the column affinity.
+
+Examples :
+
+   CREATE VIRTUAL TABLE pivot_table USING perl
+      ("SQLite::VirtualTable::Pivot","base_table" );
+
+   CREATE VIRTUAL TABLE pivot_table USING perl
+      ("SQLite::VirtualTable::Pivot","base_table",
+      "entity","attribute","value");
+
+   CREATE VIRTUAL TABLE pivot_table USING perl
+      ("SQLite::VirtualTable::Pivot","base_table",
+      "entity integer","attribute varchar","value integer");
+
+   CREATE VIRTUAL TABLE pivot_table USING perl
+      ("SQLite::VirtualTable::Pivot","base_table",
+        "entty",
+        "attribute->attribute_lookup(id).attr",
+        "value->value_lookup(id).value" );
+=cut
+
 sub CREATE {
+    my ( $class, $module, $caller, $virtual_table, $base_table, @pivot_columns ) = @_;
     trace "(CREATE, got @_)";
-    my ( $class, $module, $caller, $virtual_table, $other_table, @pivot_columns ) = @_;
-    $other_table = unescape($other_table);
+
+    # connect
     _init_db();
-    my ($pivot_row, $pivot_row_type, $pivot_column, $pivot_value );
+
+    # Get the base_table and its metadata.  Parse the sql used to create it.
+    $base_table = unescape($base_table);
     my ($createsql) =
-      $db->select( 'sqlite_master', ['sql'], { name => $other_table } )->list
-      or die "Could not find table '$other_table' " . $db->error;
+      $db->select( 'sqlite_master', ['sql'], { name => $base_table } )->list
+      or die "Could not find table '$base_table' " . $db->error;
     $createsql =~ s/^[^\(]*\(//; # remove leading
     $createsql =~ s/\)[^\)]*$//; # and trailing "CREATE" declaration, to get columns
     my @columns_and_contraints = split /,/, $createsql;
 
+    # Set up the pivot_row (entity), pivot_column (attribute) and
+    # pivot_value (value) columns, including foreign key specifications.
+    my ($pivot_row, $pivot_row_type, $pivot_column, $pivot_value );
     my ($pivot_row_ref, $pivot_column_ref, $pivot_value_ref);
     if (@pivot_columns == 3) {
         ($pivot_row, $pivot_column, $pivot_value ) = map unescape($_), @pivot_columns;
@@ -239,18 +295,22 @@ sub CREATE {
         $col =~ s/^\s*//;
         $col =~ s/ .*$//;
         next if grep /$col/i, @columns_and_contraints;
-        warn "could not find $col in columns for $other_table\n";
+        warn "could not find $col in columns for $base_table\n";
     }
-    debug "pivot col is $pivot_column";
+
+    # Now compute the distinct values of pivot_row (attribute).
+    debug "pivot_column (attribute) is $pivot_column";
     my @columns = (
         $pivot_row,
         $db->query( sprintf(
                 "SELECT DISTINCT(%s) FROM %s",
-                $pivot_column, $other_table))->flat
+                $pivot_column, $base_table))->flat
     );
-    debug "distinct values for $pivot_column in $other_table are @columns";
+    debug "distinct values for $pivot_column in $base_table are @columns";
 
     my @vcolumns = @columns;  # virtual table column names
+
+    # Maybe apply foreign key transform to make vcolumns.
     if ($pivot_column_ref) {
         @vcolumns = ($vcolumns[0]);
         for my $c (@columns) {
@@ -262,17 +322,16 @@ sub CREATE {
             push @vcolumns, $next;
         }
     }
-    for (@vcolumns) { # make column names legal
+    # Ensure that they are valid sqlite column names
+    for (@vcolumns) {
         tr/a-zA-Z0-9_//dc;
         $_ = "$pivot_column\_$_" unless $_=~/^[a-zA-Z]/;
     }
 
-    debug "pivotrowtype is '$pivot_row_type'";
-
-    $pivot_row_type ||= "varchar";
+    $pivot_row_type ||= "varchar"; # default entity type
     bless {
         name           => $virtual_table,  # the virtual pivot table name
-        table          => $other_table,    # the base table name
+        table          => $base_table,    # the base table name
         columns        => \@columns,       # the base table distinct(pivot_column) values
         vcolumns       => \@vcolumns,      # the names of the virtual pivot table columns
         pivot_row      => $pivot_row,      # the name of the "pivot row" column in the base table
@@ -287,6 +346,7 @@ sub CREATE {
 *CONNECT = \&CREATE;
 
 sub DECLARE_SQL {
+    trace "DECLARE_SQL";
     my $self = shift;
     return sprintf "CREATE TABLE %s (%s)", $self->table, join ',', $self->vcolumns;
 }
@@ -489,6 +549,20 @@ sub DROP {
 sub DISCONNECT {}
 
 *DESTROY = \&DISCONNECT;
+
+=head1 TODO
+
+    - re-use the existing database handle (requires changes
+      to SQLite::VirtualTable and DBD::SQLite)
+    - allow modification of the data in the virtual table
+    - allow value column to not have integer affinity
+    - more optimization
+
+=head1 SEE ALSO
+
+L<SQLite::VirtualTable>
+
+=cut
 
 1;
 
