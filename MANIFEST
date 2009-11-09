@@ -22,7 +22,7 @@ MANIFEST
 META.yml
 README
 t/00-load.t
-t/in-out.t
+t/commandline.t
 t/in/aggregate.sql
 t/in/homogenous.sql
 t/in/join.sql
