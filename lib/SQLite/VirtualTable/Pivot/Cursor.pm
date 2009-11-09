@@ -9,7 +9,7 @@ __PACKAGE__->mk_accessors(qw| temp_tables                   |);
 __PACKAGE__->mk_accessors(qw| virtual_table                 |);
 __PACKAGE__->mk_accessors(qw| id                            |);
 
-sub info($)   { return if   $ENV{NO_INFO}; print STDERR "# $_[0]\n"; }
+sub debug($)  { return unless $ENV{DEBUG}; print STDERR "# $_[0]\n"; }
 
 sub reset {
     my $self = shift;
@@ -47,14 +47,14 @@ sub get_next_row {
   }
   my $dumped = Dumper($self->queued);
   $dumped =~ s/\n|\s//g;
-  info "called next, queued is now $dumped ";
+  debug "called next, queued is now $dumped ";
   @$last_row = @$row;
 }
 
 sub column_value {
     my $self = shift;
     my $column_name = shift;
-    info "column $column_name: $self->{queued}->{$column_name}";
+    debug "column $column_name: $self->{queued}->{$column_name}";
     return $self->queued->{$column_name};
 }
 

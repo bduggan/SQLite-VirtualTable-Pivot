@@ -185,8 +185,6 @@ our $db;  # handle: DBIx::Simple object
 # debug setup
 #$ENV{TRACE} = 1;
 #$ENV{DEBUG} = 1;
-$ENV{NO_INFO} = 1;
-sub info($)   { return if   $ENV{NO_INFO}; print STDERR "# $_[0]\n"; }
 sub debug($)  { return unless $ENV{DEBUG}; print STDERR "# $_[0]\n"; }
 sub trace($)  { return unless $ENV{TRACE}; print STDERR "# $_[0]\n"; }
 
@@ -345,20 +343,41 @@ sub CREATE {
 }
 *CONNECT = \&CREATE;
 
+=item DECLARE_SQL
+
+Arguments: none
+Returns: a CREATE TABLE statement that specifies the columns of
+the virtual table.
+
+=cut
+
 sub DECLARE_SQL {
     trace "DECLARE_SQL";
     my $self = shift;
     return sprintf "CREATE TABLE %s (%s)", $self->table, join ',', $self->vcolumns;
 }
 
+# Map from incoming operators to sql operators
 our %OpMap = ( 'eq' => '=',  'lt' => '<',  'gt'    => '>',
                'ge' => '>=', 'le' => '<=', 'match' => 'like',);
 
+# Create a new temporary table and return its name.
 sub _new_temp_table {
     my ($count) = $db->select('sqlite_temp_master','count(1)')->list;
+    debug "made temp table numnber ".($count + 1 );
     return sprintf("temp_%d_%d",$count + 1,$$);
 }
 
+# Generate and run a query using information created during BEST_INDEX
+# calls.  This is called during a FILTER call.
+#
+# Arguments :
+#  cursor : an SQLite::VirtualTable::Pivot::Cursor object
+#  constraints : an array ref of hashrefs whose keys are :
+#                column_name - the name of the column
+#                operator - one of the keys of %OpMap above
+#  bind : an arrayref of bind values, one per constraint.
+# 
 sub _do_query {
     my ($self, $cursor, $constraints, $args) = @_;
     my @values = @$args; # bind values for constraints
@@ -395,10 +414,10 @@ sub _do_query {
                              $value_table, $self->pivot_value, $OpMap{$constraint->{operator}});
             @bind = ( $constraint->{column_name}, $value);
         }
-        info "ready to run $query with @bind";
+        debug "ready to run $query with @bind";
         $db->query($query, @bind ) or die $db->error;
 
-        info ("temp table $temp_table is for $constraint->{column_name} $constraint->{operator} $value");
+        debug ("temp table $temp_table is for $constraint->{column_name} $constraint->{operator} $value");
         #info ("temp table $temp_table has : ".join ",", $db->select($temp_table,"*")->list);
     }
     debug "created ".scalar @{ $cursor->temp_tables }." temp table(s)";
@@ -434,7 +453,7 @@ sub _do_query {
     $cursor->set( first => 1 );
     $cursor->set( queued => {} );
     $cursor->set( last_row => [] );
-    info "ran query, first row is : @current_row";
+    debug "ran query, first row is : @current_row";
 }
 
 sub OPEN {
@@ -499,7 +518,7 @@ sub FILTER {
     trace "(FILTER $cursor)";
     debug "filter -- index chosen was $idxnum ($idxstr) ";
     my $constraints = $self->indexes->[$idxnum]{constraints};
-    info "FILTER Is calling _do_query for $cursor";
+    debug "FILTER Is calling _do_query for $cursor";
     $cursor->reset;
     $self->_do_query( $cursor, $constraints, \@args );
     $self->NEXT($cursor);
