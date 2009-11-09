@@ -425,11 +425,11 @@ sub _do_query {
 
     # Now we have created the temp tables, join them together to make the final query.
 
-    my $value_table = $self->pivot_value_ref ? $self->pivot_value_ref->{table} : 'a';
+    my $value_table_or_a = $self->pivot_value_ref ? $self->pivot_value_ref->{table} : 'a';
     my $sql = sprintf( "SELECT a.%s, %s, %s.%s AS %s FROM %s a",
                         $self->pivot_row,    # == entity
                         $self->pivot_column, # == attribute
-                        $value_table,
+                        $value_table_or_a,
                         (     $self->pivot_value_ref
                             ? $self->pivot_value_ref->{child_label}
                             : $self->pivot_value ),
@@ -437,7 +437,7 @@ sub _do_query {
                         $self->table); 
 
     $sql .= sprintf(" INNER JOIN %s ON a.%s = %s.id ",
-        $value_table, $self->pivot_value, $value_table ) if $self->pivot_value_ref;
+        $value_table_or_a, $self->pivot_value, $value_table_or_a ) if $self->pivot_value_ref;
 
     for my $temp_table ($cursor->temp_tables) {
         $sql .= sprintf( " INNER JOIN %s ON %s.%s=a.%s ",
@@ -457,30 +457,53 @@ sub _do_query {
     debug "ran query, first row is : @current_row";
 }
 
+=item OPEN
+
+Create and return a new cursor.
+This returns a new SQLite::VirtualTable::Pivot::Cursor object.
+
+This is called before BEST_INDEX or FILTER, just to create the
+new empty object.
+
+=cut
+
 sub OPEN {
     my $self = shift;
     trace "(OPEN $self->{name})";
     return SQLite::VirtualTable::Pivot::Cursor->new({virtual_table => $self})->reset;
 }
 
+=item BEST_INDEX
+
+Given a set of constraints and an order, return the name
+(and number) of the best index that should be used to
+run this query, and the cost of using this index.
+
+See SQLite::VirtualTable for a more complete description of
+the incoming and outgoing parameters.
+
+=cut
+
 sub BEST_INDEX {
     my ($self,$constraints,$order_bys) = @_;
+    trace "(BEST_INDEX)";
     # $order_bys is an arrayref of hashrefs with keys "column" and "direction".
     $self->{indexes} ||= [];
     $self->{counts}  ||= {};
     my $index_number = @{ $self->indexes };
     my $index_name = "index_".$index_number;
     my $cost;
-    trace "(BEST_INDEX)";
     my $i = 0;
     my @index_constraints;
+    # We are going to build an "index" (in name only) for this set of
+    # constraints. The cost will be the total number of matching attributes
+    # in the table for each of the constraints.
     for my $constraint (@$constraints) {
+        # Keys of $constraint are : operator, usable, column.
+        # We must fill in : arg_index, omit.
         next unless $constraint->{usable};
         $cost ||= 0;
         my $column_name = $self->{columns}[$constraint->{column}];
-        debug "OPERATOR: ".$constraint->{operator}.
-            ", USABLE: ".$constraint->{usable}.
-            ", COLUMN: ".$column_name;
         $constraint->{arg_index} = $i++;  # index of this constraint as it comes through in @args to FILTER
         $constraint->{omit} = 1;
         push @index_constraints, {
@@ -513,6 +536,14 @@ sub BEST_INDEX {
     return ( $index_number, $index_name, $order_by_consumed, $cost );
 }
 
+=item FILTER
+
+Given a cursor and an index number (created dynamically in BEST_FILTER)
+and the @args to pass to the index, run the query on the base table,
+joining as necessary to filter the results.
+
+=cut
+
 sub FILTER {
     # called after OPEN, before NEXT
     my ($self, $cursor, $idxnum, $idxstr, @args) = @_; 
@@ -524,6 +555,12 @@ sub FILTER {
     $self->_do_query( $cursor, $constraints, \@args );
     $self->NEXT($cursor);
 }
+
+=item EOF
+
+Are there any more rows left?
+
+=cut
 
 sub EOF {
     my ($self, $cursor ) = @_;
@@ -537,11 +574,23 @@ sub _row_values_are_equal {
     return $val1 eq $val2;
 }
 
+=item NEXT
+
+Advance the cursor one row.
+
+=cut
+
 sub NEXT {
   my ($self,$cursor) = @_;
   trace "(NEXT $cursor)";
   $cursor->get_next_row;
 }
+
+=item COLUMN
+
+Get a piece of data from a given column (and the current row).
+
+=cut
 
 sub COLUMN  {
   my ($self, $cursor, $n) = @_;
@@ -549,10 +598,22 @@ sub COLUMN  {
   return looks_like_number($value) ? 0 + $value : $value;
 }
 
+=item ROWID
+
+Generate a unique id for this row.
+
+=cut
+
 sub ROWID {
     my ($self, $cursor) = @_;
     return $cursor->row_id;
 }
+
+=item CLOSE
+
+Close the cursor.
+
+=cut
 
 sub CLOSE {
   my ($self,$cursor) = @_;
@@ -562,9 +623,21 @@ sub CLOSE {
   }
 }
 
+=item DROP
+
+Drop the virtual table.
+
+=cut
+
 sub DROP {
 
 }
+
+=item DISCONNECT
+
+Disconnect from the database.
+
+=cut
 
 sub DISCONNECT {}
 
@@ -579,6 +652,8 @@ sub DISCONNECT {}
     - more optimization
 
 =head1 SEE ALSO
+
+L<SQLite::VirtualTable::Pivot::Cursor>
 
 L<SQLite::VirtualTable>
 
