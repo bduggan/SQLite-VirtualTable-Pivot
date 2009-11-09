@@ -7,6 +7,7 @@ abstract: Manipulate pivot tables using sqlite virtual tables
 license: perl
 resources:
   license: http://dev.perl.org/licenses/
+  repository: http://github.com/bduggan/SQLite-VirtualTable-Pivot/tree/master
 build_requires:
   Class::Accessor::Contextual: 0
   DBD::SQLite: 1.25
