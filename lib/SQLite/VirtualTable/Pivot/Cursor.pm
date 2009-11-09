@@ -1,13 +1,39 @@
+=head NAME
+
+SQLite::VirtualTable::Pivot::Cursor - a cursor for a pivot table query
+
+=head1 DESCRIPTION
+
+Objects in this class represent cursors for queries on pivot tables.
+
+They maintatin a statement handle corresponding to an unpivotted
+query on the base table.   The pivotting operation is done one
+row at a time, as data is returned; i.e. we order by the id, and
+group on the fly.
+
+It must be possible for multiple cursors to exist at once on the
+same pivot table, in case it occurs more than once in a query.
+
+=head1 SEE ALSO
+
+L<SQLite::VirtualTable::Pivot>
+
+=cut
+
 package SQLite::VirtualTable::Pivot::Cursor;
 
 use base 'Class::Accessor::Contextual';
 use Data::Dumper;
 
+# State variables (probably could be simplified)
 __PACKAGE__->mk_accessors(qw| first last done row_id queued |);
 __PACKAGE__->mk_accessors(qw| sth current_row               |);
+
+# list of temp tables
 __PACKAGE__->mk_accessors(qw| temp_tables                   |);
+
+# the virtual table to whom we belong
 __PACKAGE__->mk_accessors(qw| virtual_table                 |);
-__PACKAGE__->mk_accessors(qw| id                            |);
 
 sub debug($)  { return unless $ENV{DEBUG}; print STDERR "# $_[0]\n"; }
 
