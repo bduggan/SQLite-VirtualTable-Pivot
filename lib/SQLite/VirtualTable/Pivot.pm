@@ -381,6 +381,16 @@ sub _new_temp_table {
 sub _do_query {
     my ($self, $cursor, $constraints, $args) = @_;
     my @values = @$args; # bind values for constraints
+    my $ref = $self->pivot_value_ref;
+    # Set up join clauses and table in case the value is a foreign key.
+    my $join_clause = sprintf(
+        " INNER JOIN %s ON %s.%s=%s.%s ",
+        #e.g. " INNER JOIN value_s ON value_s.id=eav.value ";
+        $ref->{table}, $ref->{table}, $ref->{child_key},
+        $self->table,  $ref->{child_label}
+    ) if $self->pivot_row_ref;
+    my $value_table = $ref->{table} || $self->table;
+    my $value_column = $ref->{child_label} || $self->pivot_column;
     for my $constraint (@$constraints) {
         my $value = shift @values;
         my $temp_table = _new_temp_table();
@@ -397,15 +407,6 @@ sub _do_query {
                 $temp_table, $self->pivot_row, $self->table, $self->pivot_row, $OpMap{$constraint->{operator}} );
             @bind = ($value);
         } else {
-            my $ref = $self->pivot_value_ref;
-            my $join_clause = sprintf(
-                " INNER JOIN %s ON %s.%s=%s.%s ",
-                #e.g. " INNER JOIN value_s ON value_s.id=eav.value ";
-                $ref->{table}, $ref->{table}, $ref->{child_key},
-                $self->table,  $ref->{child_label}
-            ) if $self->pivot_row_ref;
-            my $value_table = $ref->{table} || $self->table;
-            my $value_column = $ref->{child_label} || $self->pivot_column;
             $query = sprintf( "INSERT INTO %s SELECT %s FROM %s %s WHERE %s = ? AND %s.%s %s ?",
                              $temp_table,
                              $self->pivot_row,
@@ -421,6 +422,8 @@ sub _do_query {
         #info ("temp table $temp_table has : ".join ",", $db->select($temp_table,"*")->list);
     }
     debug "created ".scalar @{ $cursor->temp_tables }." temp table(s)";
+
+    # Now we have created the temp tables, join them together to make the final query.
 
     my $value_table = $self->pivot_value_ref ? $self->pivot_value_ref->{table} : 'a';
     my $sql = sprintf( "SELECT a.%s, %s, %s.%s AS %s FROM %s a",
@@ -446,13 +449,11 @@ sub _do_query {
 
     # TODO move into cursor.pm
     my (@current_row);
+    $cursor->reset;
     $cursor->{sth} = $db->dbh->prepare( $sql) or die "error in $sql : $DBI::errstr";
     $cursor->sth->execute or die $DBI::errstr;
     $cursor->set( "last" => !( @current_row = $cursor->sth->fetchrow_array ) );
     $cursor->set( current_row => \@current_row );
-    $cursor->set( first => 1 );
-    $cursor->set( queued => {} );
-    $cursor->set( last_row => [] );
     debug "ran query, first row is : @current_row";
 }
 
