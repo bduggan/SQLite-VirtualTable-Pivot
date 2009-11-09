@@ -1,4 +1,4 @@
-=head NAME
+=head1 NAME
 
 SQLite::VirtualTable::Pivot::Cursor - a cursor for a pivot table query
 

@@ -343,6 +343,8 @@ sub CREATE {
 }
 *CONNECT = \&CREATE;
 
+=over
+
 =item DECLARE_SQL
 
 Arguments: none
@@ -642,6 +644,8 @@ Disconnect from the database.
 sub DISCONNECT {}
 
 *DESTROY = \&DISCONNECT;
+
+=back
 
 =head1 TODO
 
