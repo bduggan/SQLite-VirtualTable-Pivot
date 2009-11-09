@@ -24,7 +24,9 @@ if ($sqlite) {
 }
 diag "testing with '$sqlite' version $sqliteVersion";
 
-chdir $Bin or die $!;
+ok( ( chdir $Bin ), ("chdir $Bin") );
+
+-e "$ENV{HOME}/.sqliterc" and diag "NB: $ENV{HOME}/.sqliterc may interfere with tests";
 
 $ENV{PERL5LIB} = join ':', @INC;
 
