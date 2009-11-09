@@ -19,6 +19,11 @@ my $builder = Module::Build->new(
       },
     add_to_cleanup      => [ 'SQLite-VirtualTable-Pivot-*' ],
     create_makefile_pl => 'traditional',
+    meta_merge => {
+        resources => {
+            repository => 'http://github.com/bduggan/SQLite-VirtualTable-Pivot/tree/master',
+        }
+    }
 );
 
 $builder->create_build_script();
