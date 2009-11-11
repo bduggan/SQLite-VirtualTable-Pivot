@@ -1,4 +1,5 @@
-
+.timer off
+.mode list
 select load_extension('perlvtab.so');
 
 drop table if exists entities;

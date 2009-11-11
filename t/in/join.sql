@@ -1,3 +1,5 @@
+.timer off
+.mode list
 select load_extension('perlvtab.so');
 
 create table students (student, subject, grade, primary key (student,subject));

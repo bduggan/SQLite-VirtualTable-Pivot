@@ -366,7 +366,7 @@ our %OpMap = ( 'eq' => '=',  'lt' => '<',  'gt'    => '>',
 # Create a new temporary table and return its name.
 sub _new_temp_table {
     my ($count) = $db->select('sqlite_temp_master','count(1)')->list;
-    debug "made temp table numnber ".($count + 1 );
+    debug "made temp table number ".($count + 1 );
     return sprintf("temp_%d_%d",$count + 1,$$);
 }
 
@@ -494,18 +494,21 @@ sub BEST_INDEX {
     $self->{counts}  ||= {};
     my $index_number = @{ $self->indexes };
     my $index_name = "index_".$index_number;
-    my $cost;
+    ( $self->counts->{__table__} ) = $db->select( $self->table, 'count(1)', )->list;
+    my $cost = $self->counts->{__table__};
     my $i = 0;
     my @index_constraints;
     # We are going to build an "index" (in name only) for this set of
     # constraints. The cost will be the total number of matching attributes
     # in the table for each of the constraints.
+    my %seen_column;
     for my $constraint (@$constraints) {
         # Keys of $constraint are : operator, usable, column.
         # We must fill in : arg_index, omit.
         next unless $constraint->{usable};
         $cost ||= 0;
         my $column_name = $self->{columns}[$constraint->{column}];
+        debug "evaluating cost of using column $column_name, operator $constraint->{operator}";
         $constraint->{arg_index} = $i++;  # index of this constraint as it comes through in @args to FILTER
         $constraint->{omit} = 1;
         push @index_constraints, {
@@ -520,7 +523,7 @@ sub BEST_INDEX {
        }
        my $this_cost = $self->counts->{$column_name};
        #debug "this cost is $this_cost";
-       $cost += $this_cost;
+       $cost -= $this_cost unless $seen_column{$column_name}++;
     }
     push @{ $self->indexes }, { constraints => \@index_constraints, name => $index_name, cost => $cost };
     unless (defined($cost)) {
@@ -535,6 +538,7 @@ sub BEST_INDEX {
             $order_by_consumed = 1;
         }
     }
+    debug "returning:  index $index_number ($index_name) has cost $cost (orderconsumed: $order_by_consumed)";
     return ( $index_number, $index_name, $order_by_consumed, $cost );
 }
 

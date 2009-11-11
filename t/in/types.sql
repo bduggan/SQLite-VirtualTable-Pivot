@@ -1,3 +1,5 @@
+.timer off
+.mode list
 select load_extension('perlvtab.so');
 .header on
 

@@ -1,3 +1,5 @@
+.timer off
+.mode list
 select load_extension('perlvtab.so');
 
 create table sold (year integer, employee varchar, widgets integer);

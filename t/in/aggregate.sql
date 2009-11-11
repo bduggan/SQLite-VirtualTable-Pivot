@@ -1,4 +1,5 @@
-
+.timer off
+.mode list
 select load_extension('perlvtab.so');
 
 create table objects (id, attribute, value, primary key (id,attribute));
