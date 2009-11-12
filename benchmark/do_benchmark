@@ -19,9 +19,6 @@ perl mk-data-sparse.pl $ATTRIBUTES $ROWS $SPARSENESS > $DATAFILE
 
 sqlite3 $DBFILE << _DONE_
 create table base_table (id integer, field varchar, value integer, primary key (id, field));
-create index base_field on base_table(field);
-create index base_value on base_table(value);
-create index base_id    on base_table(id);
 create index base_field_value on base_table(field,value);
 .separator ,
 .import $DATAFILE base_table

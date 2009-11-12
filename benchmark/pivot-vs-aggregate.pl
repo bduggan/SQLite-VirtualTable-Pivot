@@ -4,7 +4,16 @@ use strict;
 use IO::File;
 use File::Temp;
 
-my $template = "select attribute_001 from %s where attribute_001 < %d;";
+#my $template = "select attribute_001 from %s where attribute_001 < %d;";
+my $template = "select * from %s where attribute_001=%d and attribute_002 > 0;";
+#my $template = "select * from %s where attribute_001=%d;";
+#my $template = "select attribute_001, count(1) from %s group by 1 limit %d;";
+#my $template = <<FIN;
+#select id,attribute_001,attribute_002 from %s
+#where (attribute_001 between 100 and 900)
+#    and (attribute_002 between %d and 900)
+#    and (attribute_003 < 800 or attribute_003 > 900) order by id;
+#FIN
 
 sub _do_query {
     my $query = shift;
